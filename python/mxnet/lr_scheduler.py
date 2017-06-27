@@ -119,3 +119,48 @@ class MultiFactorScheduler(LRScheduler):
             else:
                 return self.base_lr
         return self.base_lr
+
+class MFScheduler(LRScheduler):
+    """Reduce the learning rate by given a list of steps and a list of factors.
+
+    Assume there exists *k* such that::
+
+       step[k] <= num_update and num_update < step[k+1]
+
+    Then calculate the new learning rate by::
+
+       base_lr *= factor[k]
+
+    Parameters
+    ----------
+    step: list of int
+        The list of steps to schedule a change
+    factor: list of float
+        The list of factors to change the learning rate.
+    """
+    def __init__(self, step, factor):
+        super(MFScheduler, self).__init__()
+        assert isinstance(step, list) and len(step) >= 1
+        assert isinstance(factor, list) and len(factor) >= 1
+	assert len(step) == len(factor)
+        for i, _step in enumerate(step):
+            if i != 0 and step[i] <= step[i-1]:
+                raise ValueError("Schedule step must be an increasing integer list")
+            if _step < 1:
+                raise ValueError("Schedule step must be greater or equal than 1 round")
+        self.step = step
+        self.cur_step_ind = 0
+        self.factor = factor
+        self.count = 0
+
+    def __call__(self, num_update):
+        while self.cur_step_ind <= len(self.step)-1:
+            if num_update > self.step[self.cur_step_ind]:
+                self.count = self.step[self.cur_step_ind]
+                self.base_lr *= self.factor[self.cur_step_ind]
+                self.cur_step_ind += 1
+                logging.info("Update[%d]: Change learning rate to %0.5e",
+                             num_update, self.base_lr)
+            else:
+                return self.base_lr
+        return self.base_lr
