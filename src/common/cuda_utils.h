@@ -7,6 +7,24 @@
 #define MXNET_COMMON_CUDA_UTILS_H_
 
 #include <dmlc/logging.h>
+#include <mshadow/base.h>
+
+/*! \brief Macros/inlines to assist CLion to parse Cuda files (*.cu, *.cuh) */
+#ifdef __JETBRAINS_IDE__
+#define __CUDACC__ 1
+#define __host__
+#define __device__
+#define __global__
+#define __forceinline__
+#define __shared__
+inline void __syncthreads() {}
+inline void __threadfence_block() {}
+template<class T> inline T __clz(const T val) { return val; }
+struct __cuda_fake_struct { int x; int y; int z; };
+extern __cuda_fake_struct blockDim;
+extern __cuda_fake_struct threadIdx;
+extern __cuda_fake_struct blockIdx;
+#endif
 
 #if MXNET_USE_CUDA
 
@@ -152,4 +170,51 @@ inline const char* CurandGetErrorString(curandStatus_t status) {
   }
 
 #endif  // MXNET_USE_CUDNN
+
+// Overload atomicAdd to work for floats on all architectures
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 600
+// From CUDA Programming Guide
+static inline  __device__  void atomicAdd(double *address, double val) {
+  unsigned long long* address_as_ull =                  // NOLINT(*)
+    reinterpret_cast<unsigned long long*>(address);     // NOLINT(*)
+  unsigned long long old = *address_as_ull;             // NOLINT(*)
+  unsigned long long assumed;                           // NOLINT(*)
+
+  do {
+    assumed = old;
+    old = atomicCAS(address_as_ull, assumed,
+                    __double_as_longlong(val +
+                    __longlong_as_double(assumed)));
+
+    // Note: uses integer comparison to avoid hang in case of NaN (since NaN != NaN)
+  } while (assumed != old);
+}
+#endif
+
+// Overload atomicAdd for half precision
+// Taken from:
+// https://github.com/torch/cutorch/blob/master/lib/THC/THCAtomics.cuh
+#if defined(__CUDA_ARCH__)
+static inline __device__ void atomicAdd(mshadow::half::half_t *address,
+                                        mshadow::half::half_t val) {
+  unsigned int *address_as_ui =
+      reinterpret_cast<unsigned int *>(reinterpret_cast<char *>(address) -
+                                   (reinterpret_cast<size_t>(address) & 2));
+  unsigned int old = *address_as_ui;
+  unsigned int assumed;
+
+  do {
+    assumed = old;
+    mshadow::half::half_t hsum;
+    hsum.half_ =
+        reinterpret_cast<size_t>(address) & 2 ? (old >> 16) : (old & 0xffff);
+    hsum += val;
+    old = reinterpret_cast<size_t>(address) & 2
+              ? (old & 0xffff) | (hsum.half_ << 16)
+              : (old & 0xffff0000) | hsum.half_;
+    old = atomicCAS(address_as_ui, assumed, old);
+  } while (assumed != old);
+}
+#endif
+
 #endif  // MXNET_COMMON_CUDA_UTILS_H_

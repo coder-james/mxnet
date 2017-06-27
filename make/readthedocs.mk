@@ -32,6 +32,8 @@ USE_OPENMP = 0
 # can be: mkl, blas, atlas, openblas
 USE_STATIC_MKL = NONE
 USE_BLAS = NONE
+USE_LAPACK = 0
+
 #
 # add path to intel library, you may need it
 # for MKL, if you did not add the path to environment variable
@@ -64,3 +66,6 @@ USE_S3 = 0
 
 # path to libjvm.so
 LIBJVM=$(JAVA_HOME)/jre/lib/amd64/server
+
+# uses O0 instead of O3 for better performance
+DEBUG = 1

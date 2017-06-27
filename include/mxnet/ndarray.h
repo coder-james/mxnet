@@ -11,6 +11,7 @@
 #include <dmlc/io.h>
 #include <dmlc/type_traits.h>
 #include <dmlc/registry.h>
+#include <nnvm/node.h>
 #include <vector>
 #include <map>
 #include <string>
@@ -18,22 +19,53 @@
 #include "./base.h"
 #include "./storage.h"
 #include "./engine.h"
-
+#if MKL_EXPERIMENTAL == 1
+#include <mkl_memory.h>
+#endif
 // check c++11
 #if DMLC_USE_CXX11 == 0
 #error "cxx11 was required for ndarray module"
 #endif
 
 namespace mxnet {
+
+// forward declaration
+namespace autograd {
+class AGNode;
+
+using AGNodePtr = std::shared_ptr<AGNode>;
+
+class AGNodeEntry {
+ public:
+  AGNodePtr ag_node;
+  uint32_t index;
+  uint32_t version;
+
+  void clear() {
+    ag_node.reset();
+    index = version = 0;
+  }
+
+  nnvm::NodeEntry nn_entry() const;
+  bool is_none() const;
+};
+
+class AutogradRuntime;
+}  // namespace autograd
+
 /*!
  * \brief ndarray interface
  */
 class NDArray {
  public:
-  /*! \brief default cosntructor */
-  NDArray() {}
+  /*! \brief default constructor */
+  NDArray() {
+#if MKL_EXPERIMENTAL == 1
+    Mkl_mem_ = MKLMemHolder::create();
+#endif
+  }
   /*!
-   * \brief constructing a new dynamic NDArray
+   * \brief constructs a new dynamic NDArray
    * \param shape the shape of array
    * \param ctx context of NDArray
    * \param delay_alloc whether delay the allocation
@@ -42,7 +74,10 @@ class NDArray {
   NDArray(const TShape &shape, Context ctx,
           bool delay_alloc = false, int dtype = mshadow::default_type_flag)
       : ptr_(std::make_shared<Chunk>(shape.Size(), ctx, delay_alloc, dtype)),
-        shape_(shape), offset_(0), dtype_(dtype) {
+        shape_(shape), dtype_(dtype), entry_({nullptr, 0, 0}) {
+#if MKL_EXPERIMENTAL == 1
+    Mkl_mem_ = std::make_shared<MKLMemHolder>();
+#endif
   }
   /*!
    * \brief constructing a static NDArray that shares data with TBlob
@@ -52,25 +87,25 @@ class NDArray {
    * \param dev_id the device id this tensor sits at
    */
   NDArray(const TBlob &data, int dev_id)
-      : ptr_(std::make_shared<Chunk>(data, dev_id)), shape_(data.shape_), offset_(0),
-        dtype_(data.type_flag_) {
+      : ptr_(std::make_shared<Chunk>(data, dev_id)), shape_(data.shape_),
+        dtype_(data.type_flag_), entry_({nullptr, 0, 0}) {
+#if MKL_EXPERIMENTAL == 1
+    Mkl_mem_ = std::make_shared<MKLMemHolder>();
+#endif
   }
   /*!
    * \return the shape of current NDArray
    */
-  inline const TShape &shape() const {
+  inline const TShape& shape() const {
     return shape_;
   }
   /*!
    * \return the data TBlob
    */
-  inline TBlob data() const {
-    TBlob res;
-    MSHADOW_TYPE_SWITCH(dtype_, DType, {
-      res = TBlob(static_cast<DType*>(ptr_->shandle.dptr)
-        + offset_, shape_, ptr_->shandle.ctx.dev_mask());
-    });
-    return res;
+  inline const TBlob& data() const {
+    CheckAndAlloc();
+    SetTBlob();
+    return tblob_;
   }
   /*!
    * \return the context of NDArray, this function is only valid when the NDArray is not empty
@@ -88,6 +123,10 @@ class NDArray {
   inline bool is_none() const {
     return ptr_.get() == nullptr;
   }
+  /*! \return updated grad state in entry_ */
+  bool fresh_out_grad() const;
+  /*! \return updated grad state in entry_ */
+  void set_fresh_out_grad(bool state) const;
   /*!
    * \brief Block until all the pending write operations with respect
    *    to current NDArray are finished, and read can be performed.
@@ -147,42 +186,42 @@ class NDArray {
   /*!
    * \brief elementwise subtract from current ndarray
    * this mutate the current NDArray
-   * \param src the data to substract
+   * \param src the data to subtract
    * \return reference of self
    */
   NDArray &operator-=(const NDArray &src);
   /*!
    * \brief elementwise subtract from current ndarray
    * this mutate the current NDArray
-   * \param src the data to substract
+   * \param src the data to subtract
    * \return reference of self
    */
   NDArray &operator-=(const real_t &src);
   /*!
    * \brief elementwise multiplication to current ndarray
    *  this mutate the current NDArray
-   * \param src the data to substract
+   * \param src the data to subtract
    * \return reference of self
    */
   NDArray &operator*=(const NDArray &src);
   /*!
    * \brief elementwise multiplication to current ndarray
    *  this mutate the current NDArray
-   * \param src the data to substract
+   * \param src the data to subtract
    * \return reference of self
    */
   NDArray &operator*=(const real_t &src);
   /*!
    * \brief elementwise division from current ndarray
    *  this mutate the current NDArray
-   * \param src the data to substract
+   * \param src the data to subtract
    * \return reference of self
    */
   NDArray &operator/=(const NDArray &src);
   /*!
    * \brief elementwise division from current ndarray
    *  this mutate the current NDArray
-   * \param src the data to substract
+   * \param src the data to subtract
    * \return reference of self
    */
   NDArray &operator/=(const real_t &src);
@@ -225,27 +264,33 @@ class NDArray {
    * \param end end index in first dim
    * \return sliced NDArray
    */
-  inline NDArray Slice(index_t begin, index_t end) const {
-    NDArray ret = *this;
-    CHECK(!is_none()) << "NDArray is not initialized";
-    CHECK_GE(shape_[0], end) << "Slice end index out of range";
-    size_t length = shape_.ProdShape(1, shape_.ndim());
-    ret.offset_ += begin * length;
-    ret.shape_[0] = end - begin;
-    return ret;
-  }
+  NDArray Slice(index_t begin, index_t end) const;
   /*!
    * \brief Index a NDArray
    * \param idx the index
    * \return idx-th sub array NDArray
    */
-  inline NDArray At(index_t idx) const {
+  NDArray At(index_t idx) const;
+  /*!
+   * \brief Create a NDArray that shares memory with current one
+   *  The new array must have smaller memory size than the current array.
+   * \param shape new shape
+   * \param dtype The data type.
+   * \return NDArray in new shape and type.
+   */
+  inline NDArray AsArray(const TShape &shape, int dtype) const {
+    CHECK_GE(shape_.Size() * mshadow::mshadow_sizeof(dtype_),
+             shape.Size() * mshadow::mshadow_sizeof(dtype))
+        << "NDArray.AsArray: target memory size is bigger";
+#if MKL_EXPERIMENTAL == 1
+    if (Mkl_mem_ != nullptr) {
+      // convert prv to cpu
+      Mkl_mem_->check_and_prv_to_cpu(ptr_->shandle.dptr);
+    }
+#endif
     NDArray ret = *this;
-    CHECK(!is_none()) << "NDArray is not initialized";
-    CHECK_GE(shape_[0], idx) << "index out of range";
-    size_t length = shape_.ProdShape(1, shape_.ndim());
-    ret.offset_ += idx * length;
-    ret.shape_ = TShape(shape_.data()+1, shape_.data()+shape_.ndim());
+    ret.shape_ = shape;
+    ret.dtype_ = dtype;
     return ret;
   }
   /*!
@@ -253,11 +298,13 @@ class NDArray {
    * \param shape new shape
    * \return NDArray in new shape
    */
-  inline NDArray Reshape(const TShape &shape) const {
-    CHECK_GE(shape_.Size(), shape.Size())
-        << "NDArray.Reshape: target shape size is different from current shape";
-    NDArray ret = *this;
-    ret.shape_ = shape;
+  NDArray Reshape(const TShape &shape) const;
+  /*!
+   * \brief Return a copy of this NDArray without autograd history
+   */
+  NDArray Detach() const {
+    NDArray ret(*this);
+    ret.entry_ = autograd::AGNodeEntry{nullptr, 0, 0};
     return ret;
   }
   /*!
@@ -268,7 +315,7 @@ class NDArray {
     ptr_->CheckAndAlloc();
   }
   /*!
-   * \brief Save list of narray into the Stream.x
+   * \brief Save list of ndarray into the Stream.x
    * \param fo The stream of output.
    * \param data the NDArrays to be saved.
    * \param names the name of the NDArray, optional, can be zero length.
@@ -277,7 +324,7 @@ class NDArray {
                    const std::vector<NDArray>& data,
                    const std::vector<std::string>& names);
   /*!
-   * \brief Load list of narray into from the stream.
+   * \brief Load list of ndarray into from the stream.
    * \param fi The stream of the input file.
    * \param data the NDArrays to be loaded
    * \param keys the name of the NDArray, if saved in the file.
@@ -287,6 +334,7 @@ class NDArray {
                    std::vector<std::string>* keys);
 
  private:
+  friend class autograd::AutogradRuntime;
   /*! \brief the real data chunk that backs NDArray */
   struct Chunk {
     /*! \brief storage handlefrom storage engine */
@@ -309,10 +357,10 @@ class NDArray {
         : static_data(true),
           delay_alloc(false) {
       var = Engine::Get()->NewVariable();
-      if (data.dev_mask_ == cpu::kDevMask) {
+      if (data.dev_mask() == cpu::kDevMask) {
         shandle.ctx = Context::CPU();
       } else {
-        CHECK_EQ(data.dev_mask_, gpu::kDevMask);
+        CHECK_EQ(data.dev_mask(), gpu::kDevMask);
         shandle.ctx = Context::GPU(dev_id);
       }
       shandle.dptr = data.dptr_;
@@ -345,14 +393,38 @@ class NDArray {
       }
     }
   };
+
+  void SetTBlob() const {
+    tblob_.dptr_ = static_cast<char*>(ptr_->shandle.dptr) + byte_offset_;
+    tblob_.shape_ = shape_;
+    tblob_.type_flag_ = dtype_;
+    tblob_.SetDLTensor(ptr_->shandle.ctx.dev_mask(), ptr_->shandle.ctx.dev_id);
+#if MKL_EXPERIMENTAL == 1
+    tblob_.Mkl_mem_ = Mkl_mem_;
+#endif
+  }
+
+#if MKL_EXPERIMENTAL == 1
+  std::shared_ptr<MKLMemHolder> Mkl_mem_;
+#endif
   /*! \brief internal data of NDArray */
   std::shared_ptr<Chunk> ptr_;
   /*! \brief shape of current NDArray */
   TShape shape_;
-  /*! \brief offset in chunk */
-  size_t offset_;
+  /*! \brief byte offset in chunk */
+  size_t byte_offset_ = 0;
   /*! \brief type of data */
-  int dtype_;
+  int dtype_ = -1;
+  /*! \brief node entry for autograd */
+  autograd::AGNodeEntry entry_;
+  /*!
+   * \brief internal TBlob
+   * \note When user access tblob_ by some const methods like
+   *     NDArray::data(), the dptr in tblob_ still need to be updated
+   *     in case that allocation happens. So we make it mutable for
+   *     this situation.
+   */
+  mutable TBlob tblob_;
 };
 
 /*!
@@ -367,6 +439,7 @@ class NDArray {
  *     due to different possible convention carried by copy function.
  */
 void CopyFromTo(const NDArray &from, NDArray *to, int priority = 0);
+
 
 /*!
  * \brief Perform elementwise sum over each data from source, store result into out.
@@ -391,14 +464,14 @@ NDArray operator+(const NDArray &lhs, const NDArray &rhs);
  */
 NDArray operator+(const NDArray &lhs, const real_t &rhs);
 /*!
- * \brief elementwise substraction
+ * \brief elementwise subtraction
  * \param lhs left operand
  * \param rhs right operand
  * \return a new result ndarray
  */
 NDArray operator-(const NDArray &lhs, const NDArray &rhs);
 /*!
- * \brief elementwise substraction
+ * \brief elementwise subtraction
  * \param lhs left operand
  * \param rhs right operand
  * \return a new result ndarray
@@ -445,7 +518,6 @@ void RandomSeed(uint32_t seed);
  * \param out output NDArray.
  */
 void SampleUniform(real_t begin, real_t end, NDArray *out);
-
 /*!
  * \brief Sample gaussian distribution for each elements of out.
  * \param mu mean of gaussian distribution.
@@ -453,9 +525,45 @@ void SampleUniform(real_t begin, real_t end, NDArray *out);
  * \param out output NDArray.
  */
 void SampleGaussian(real_t mu, real_t sigma, NDArray *out);
+/*!
+ * \brief Sample gamma distribution for each elements of out.
+ * \param alpha parameter (shape) of the gamma distribution
+ * \param beta parameter (scale) of the gamma distribution
+ * \param out output NDArray.
+ */
+void SampleGamma(real_t alpha, real_t beta, NDArray *out);
+/*!
+ * \brief Sample exponential distribution for each elements of out.
+ * \param lambda parameter (rate) of the exponential distribution
+ * \param out output NDArray.
+ */
+void SampleExponential(real_t lambda, NDArray *out);
+/*!
+ * \brief Sample Poisson distribution for each elements of out.
+ * \param lambda parameter (rate) of the Poisson distribution
+ * \param out output NDArray.
+ */
+void SamplePoisson(real_t lambda, NDArray *out);
+/*!
+ * \brief Sample negative binomial distribution for each elements of out.
+ * \param k failure limit
+ * \param p success probability
+ * \param out output NDArray.
+ */
+void SampleNegBinomial(int32_t k, real_t p, NDArray *out);
+/*!
+ * \brief Sample generalized negative binomial distribution for each elements of out.
+ * \param mu parameter (mean) of the distribution
+ * \param alpha parameter (over dispersion) of the distribution
+ * \param out output NDArray.
+ */
+void SampleGenNegBinomial(real_t mu, real_t alpha, NDArray *out);
+
+
 //--------------------------------------------------------------
 // The following part are API Registration of NDArray functions.
 //--------------------------------------------------------------
+
 /*! \brief definition of NDArray function */
 typedef std::function<void (NDArray **used_vars,
                             real_t *scalars,

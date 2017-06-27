@@ -1,29 +1,57 @@
 # Bucketing in MXNet
+When we train recurrent neural networks (RNNs), we _unroll_ the network in time.
+For a single example of length T, we would unroll the network T steps.
+In the unrolled view, the network is acyclic and thus we can think of it
+as a feedforward neural network in which weights are tied across adjacent time steps.
+The unrolled view allows us to train the network via the traditional backpropagation algorithm -
+in this case, we call the algorithm _back-propagation through time_.
 
-## Introduction
+Things get complicated when we work with datasets where the example sequences have varying lengths.
+In the _recurrent_ view, each example can pass through the same architecture.
+But in the _unrolled_ view, each example requires a different number of unrollings, and thus corresponds to a _slightly_ different feedforward network.
+If we train on one example at a time, we can simply unroll the desired amount on each training iteration.
+But things get more complicated when we try to perform mini-batch training.
+A naive approach might be to pad all the sequences so that they appear to have the length of the longest example.
+However, this could be wasteful because on shorter sequences, most of the computations are done on padded data.
 
-Bucketing is a way to train multiple networks with "different but similar" architectures that share the same set of parameters. A typical application is in recurrent neural networks (RNNs). Unrolling the network explicitly in time is commonly used to implement RNNs in toolkits that use symbolic network definition. For explicit unrolling, we need to know the sequence length in advance. In order to handle all the sequences, we need to unroll the network to the maximum possible sequence length. However, this could be wasteful because on shorter sequences, most of the computations are on padded data.
+Borrowed from [TensorFlow's sequence training code](https://www.tensorflow.org/versions/r0.7/tutorials/seq2seq/index.html),
+_bucketing_ offers an effective solution to make minibatches out of varying-length sequences.
+Instead of unrolling the network to the maximum possible sequence length,
+we unroll multiple instances of different lengths (e.g., length 5, 10, 20, 30).
+During training, we use the most appropriate unrolled model
+for each mini-batch of data.
+Although the models *with different numbers of unrollings*
+have different feedforward architectures,
+their parameters are shared in time.
+_MXNet_ reuses the internal memory buffers among all executors.
 
-Bucketing, borrowed from [Tensorflow's sequence training example](https://www.tensorflow.org/versions/r0.7/tutorials/seq2seq/index.html), is a simple solution to this: instead of unrolling the network to the maximum possible sequence, we unroll multiple instance of different lengths (e.g. length 5, 10, 20, 30). During training, the most appropriate unrolled model is used for each mini-batch data with different sequence length. Note for RNNs, although those models have different architecture, because the parameters are shared in time. So although models in different buckets are selected to train in different mini-batches, essentially the same set of parameters are being optimized. MXNet re-use the internal memory buffers among all executors.
-
-For simple RNNs, (potentially at the cost of slower speed) one can use a for loop to explicitly go over the input sequences and do *back-propagate through time* by maintaining the connection of the states and gradients through time. This naturally works with variable length sequences. However, for more complicated models (e.g. seq2seq used translation), explicitly unrolling is the easiest way. In this tutorial, we introduce the APIs in MXNet that allows us to implement bucketing.
+For simple RNNs, you can use a for loop to explicitly
+go over the input sequences and perform a backpropagation-through-time
+by maintaining the connection of the states and gradients through time.
+However, this implementation approach results in slow processing.
+This approach works with variable length sequences. For more complicated models (e.g., translation that uses a sequence-to-sequence model), explicitly unrolling is the easiest way. In this example, we introduce the MXNet APIs that allows us to implement bucketing.
 
 ## Variable-length Sequence Training for PTB
 
-Taking the [PennTreeBank language model example](https://github.com/dmlc/mxnet/tree/master/example/rnn) as our demonstration here. If you are not familiar with this example, please also refer to [this tutorial (in Julia)](http://dmlc.ml/mxnet/2015/11/15/char-lstm-in-julia.html).
+We use the [PennTreeBank language model example](https://github.com/dmlc/mxnet/tree/master/example/rnn) for this example. If you are not familiar with this example, see [this tutorial (in Julia)](http://dmlc.ml/mxnet/2015/11/15/char-lstm-in-julia.html) first.
 
-The architecture used in the example is a simple word-embedding layer followed by two LSTM layers. In the original example, the model is unrolled explicitly in time for a fixed length of 32. In this demo, we will show how to use bucketing to implement variable-length sequence training.
-
-In order to enable bucketing, MXNet need to know how to construct a new unrolled symbolic architecture for a different sequence length. To achieve this, instead of constructing a model with a fixed `Symbol`, we use a callback function that generating new `Symbol` on a *bucket key*.
+In this example, we use a simple architecture
+consisting of a word-embedding layer
+followed by two LSTM layers.
+In the original example,
+the model is unrolled explicitly in time for a fixed length of 32.
+ <!-- In this tutorial, we show how to use bucketing to implement variable-length sequence training. -->
+To enable bucketing, MXNet needs to know how to construct a new unrolled symbolic architecture for a different sequence length. To achieve this, instead of constructing a model with a fixed `Symbol`, we use a callback function that generates a new `Symbol` on a *bucket key*.
 
 
 ```python
-model = mx.model.FeedForward(
-        ctx     = contexts,
-        symbol  = sym_gen)
+model = mx.mod.BucketingModule(
+        sym_gen             = sym_gen,
+        default_bucket_key  = data_train.default_bucket_key,
+        context             = contexts)
 ```
 
-Here `sym_gen` must be a function taking one argument `bucket_key` and returns a `Symbol` for this bucket. In our example, we will use the sequence length as the bucket key. But in general, a bucket key could be anything. For example, in neural translation, since different combination of input-output sequence lengths correspond to different unrolling, the bucket key could be a pair of lengths.
+`sym_gen` must be a function that takes one argument, `bucket_key`, and returns a `Symbol` for this bucket. We'll use the sequence length as the bucket key. A bucket key could be anything. For example, in neural translation, because different combinations of input-output sequence lengths correspond to different unrolling, the bucket key could be a pair of lengths.
 
 ```python
 def sym_gen(seq_len):
@@ -31,20 +59,38 @@ def sym_gen(seq_len):
                        num_hidden=num_hidden, num_embed=num_embed,
                        num_label=len(vocab))
 ```
-The data iterator need to report the `default_bucket_key`, which allows MXNet to do some parameter initialization before actually reading the data. Now the model is capable of training with different buckets by sharing the parameters as well as intermediate computation buffers between bucket executors.
+The data iterator needs to report the `default_bucket_key`, which allows MXNet to do some parameter initialization before reading the data. Now the model is capable of training with different buckets by sharing the parameters and intermediate computation buffers between bucket executors.
 
-However, to achieve training, we still need to add some extra bits to our `DataIter`. Apart from reporting the `default_bucket_key` as mentioned above, we also need to report the current `bucket_key` for each mini-batch. More specifically, the `DataBatch` object returned in each mini-batch by the `DataIter` should contain the following *extra* properties
+To train, we still need to add some extra bits to our `DataIter`. Apart from reporting the `default_bucket_key` as mentioned previously, we also need to report the current `bucket_key` for each mini-batch. More specifically, the `DataBatch` object returned in each mini-batch by the `DataIter` should contain the following additional properties:
 
-* `bucket_key`: the bucket key corresponding to this batch of data. In our example, it will be the sequence length for this batch of data. If the executors corresponding to this bucket key has not yet been created, they will be constructed according to the symbolic model returned by `gen_sym` on this bucket key. Created executors will be cached for future use. Note the generated `Symbol` could be arbitrary, but they should all have the same trainable parameters and auxiliary states.
-* `provide_data`: this is the same information reported by the `DataIter` object. Since now each bucket corresponds to different architecture, they could have different input data. Also, one **should** make sure that the `provide_data` information returned by the `DataIter` object is compatible with the architecture for `default_bucket_key`.
-* `provide_label`: the same as `provide_data`.
+* `bucket_key`: The bucket key that corresponds to this batch of data.
+In our example, it is the sequence length for this batch of data.
+If the executors corresponding to this bucket key have not yet been created,
+they will be constructed according to the symbolic model returned by `gen_sym` on this bucket key.
+The executors will be cached for future use.
+Note that generated `Symbol`s could be arbitrary,
+but they should all have the same trainable parameters and auxiliary states.
+* `provide_data`: The same information reported by the `DataIter` object.
+Because each bucket now corresponds to a different architecture,
+they could have different input data.
+Also, make sure that the `provide_data` information returned by the `DataIter` object
+is compatible with the architecture for `default_bucket_key`.
+* `provide_label`: The same as `provide_data`.
 
-Now the `DataIter` is responsible for grouping the data into different buckets. Assuming randomization is enabled, in each mini-batch, it choose a random bucket (according to a distribution balanced by the bucket sizes), and then randomly choose sequences from that bucket to form a mini-batch. And do some proper *padding* for sequences of different length *within* the mini-batch if necessary.
+The `DataIter` is responsible for grouping the data into different buckets.
+Assuming that randomization is enabled, at each iteration,
+`DataIter` chooses a random bucket (according to a distribution balanced by the bucket sizes),
+and then randomly chooses sequences from that bucket to form a mini-batch.
+It also applies padding for sequences of different length within the mini-batch as necessary.
 
-Please refer to [example/rnn/lstm_ptb_bucketing.py](https://github.com/dmlc/mxnet/blob/master/example/rnn/lstm_bucketing.py) for the full implementation of a `DataIter` that read text sequences implement the API shown above. In this example, bucketing can be used with a static configuration (e.g. `buckets = [10, 20, 30, 40, 50, 60]`), or let MXnet to generate bucketing automatically according to dataset(`buckets = []`). The latter approach is implemented with greedily adding a bucket as long as the number of input for the bucket is large enough(see [default_gen_buckets()](https://github.com/dmlc/mxnet/blob/master/example/rnn/bucket_io.py#L43)). 
+For a full, working implementation of a `DataIter`
+that reads text sequences by as described above, see [example/rnn/lstm_ptb_bucketing.py](https://github.com/dmlc/mxnet/blob/master/example/rnn/lstm_bucketing.py).
+In this example, you can use bucketing with a static configuration (e.g., `buckets = [10, 20, 30, 40, 50, 60]`), or let MXNet generate buckets automatically according to the characteristics of the dataset (`buckets = []`). The latter approach is implemented by adding a bucket as long as the number of sequences assigned to that bucket is exceeds some minimum count. For more information, see [default_gen_buckets()](https://github.com/dmlc/mxnet/blob/master/example/rnn/old/bucket_io.py#L43).
 
 ## Beyond Sequence Training
 
-We briefly explained how the bucketing API looks like in the example above. However, as it might be already clear: the API is not limited to bucketing according to the sequence lengths. The bucket key could be arbitrary objects. As long as the architecture returned by `gen_sym` is compatible with each other (having the same set of parameters).
-
-
+In this example, we briefly explained how the bucketing API works.
+However, the API is not limited to bucketing by sequence lengths.
+The bucket key can be an arbitrary object, as long
+as the architecture returned by `gen_sym`
+is compatible with (has the same set of parameters) as the object.

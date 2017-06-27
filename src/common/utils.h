@@ -8,6 +8,7 @@
 
 #if DMLC_USE_CXX11
 #include <memory>
+#include <vector>
 #include <type_traits>
 #include <utility>
 #include <random>
@@ -16,12 +17,12 @@
 #endif  // DMLC_USE_CXX11
 
 #include <dmlc/logging.h>
+#include <mxnet/engine.h>
 
 namespace mxnet {
 namespace common {
 
 #if DMLC_USE_CXX11
-
 // heuristic to dermine number of threads per GPU
 inline int GetNumThreadPerGPU() {
   // This is resource efficient option.

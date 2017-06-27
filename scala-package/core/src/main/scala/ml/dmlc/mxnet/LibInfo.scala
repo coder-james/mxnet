@@ -1,3 +1,20 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package ml.dmlc.mxnet
 
 import ml.dmlc.mxnet.Base._
@@ -6,20 +23,30 @@ import scala.collection.mutable.{ArrayBuffer, ListBuffer}
 
 /**
  * JNI functions
- * @author Yizhi Liu
  */
-class LibInfo {
+private[mxnet] class LibInfo {
   @native def nativeLibInit(): Int
-  // NDArray
-  @native def mxNDArrayFree(handle: NDArrayHandle): Int
   @native def mxGetLastError(): String
+  // Operators
+  @native def mxListAllOpNames(names: ListBuffer[String]): Int
+  @native def nnGetOpHandle(opName: String, opHandle: RefLong): Int
+  // NDArray
+  @native def mxImperativeInvoke(creator: FunctionHandle,
+                                 inputs: Array[NDArrayHandle],
+                                 outputsGiven: Array[NDArrayHandle],
+                                 outputs: ArrayBuffer[NDArrayHandle],
+                                 numParams: Int,
+                                 paramKeys: Array[String],
+                                 paramVals: Array[String]): Int
+  @native def mxNDArrayFree(handle: NDArrayHandle): Int
   @native def mxNDArrayCreateNone(out: NDArrayHandleRef): Int
-  @native def mxNDArrayCreate(shape: Array[Int],
-                              ndim: Int,
-                              devType: Int,
-                              devId: Int,
-                              delayAlloc: Int,
-                              out: NDArrayHandleRef): Int
+  @native def mxNDArrayCreateEx(shape: Array[Int],
+                                ndim: Int,
+                                devType: Int,
+                                devId: Int,
+                                delayAlloc: Int,
+                                dtype: Int,
+                                out: NDArrayHandleRef): Int
   @native def mxNDArrayWaitAll(): Int
   @native def mxNDArrayWaitToRead(handle: NDArrayHandle): Int
   @native def mxListFunctions(functions: ListBuffer[FunctionHandle]): Int
@@ -50,12 +77,15 @@ class LibInfo {
                                 ndim: MXUintRef,
                                 data: ArrayBuffer[Int]): Int
   @native def mxNDArraySyncCopyToCPU(handle: NDArrayHandle,
-                                     data: Array[MXFloat],
+                                     data: Array[Byte],
                                      size: Int): Int
   @native def mxNDArraySlice(handle: NDArrayHandle,
                              start: MXUint,
                              end: MXUint,
                              sliceHandle: NDArrayHandleRef): Int
+  @native def mxNDArrayAt(handle: NDArrayHandle,
+                          idx: MXUint,
+                          out: NDArrayHandleRef): Int
   @native def mxNDArrayReshape(handle: NDArrayHandle,
                                nDim: Int,
                                dims: Array[Int],
@@ -74,6 +104,7 @@ class LibInfo {
   @native def mxNDArrayGetContext(handle: NDArrayHandle, devTypeId: RefInt, devId: RefInt): Int
   @native def mxNDArraySaveRawBytes(handle: NDArrayHandle, buf: ArrayBuffer[Byte]): Int
   @native def mxNDArrayLoadFromRawBytes(bytes: Array[Byte], handle: NDArrayHandleRef): Int
+  @native def mxNDArrayGetDType(handle: NDArrayHandle, dtype: RefInt): Int
 
   // KVStore Server
   @native def mxInitPSEnv(keys: Array[String], values: Array[String]): Int
@@ -155,6 +186,12 @@ class LibInfo {
                                          paramVals: Array[String],
                                          symHandleRef: SymbolHandleRef): Int
   @native def mxSymbolSetAttr(handle: SymbolHandle, key: String, value: String): Int
+  @native def mxSymbolListAttrShallow(handle: SymbolHandle,
+                                      outSize: MXUintRef,
+                                      out: ArrayBuffer[String]): Int
+  @native def mxSymbolListAttr(handle: SymbolHandle,
+                               outSize: MXUintRef,
+                               out: ArrayBuffer[String]): Int
   @native def mxSymbolCompose(handle: SymbolHandle,
                               name: String,
                               keys: Array[String],
@@ -230,4 +267,41 @@ class LibInfo {
   @native def mxRandomSeed(seed: Int): Int
 
   @native def mxNotifyShutdown(): Int
+
+  // RecordIO
+  @native def mxRecordIOWriterCreate(uri: String, out: RecordIOHandleRef): Int
+  @native def mxRecordIOReaderCreate(uri: String, out: RecordIOHandleRef): Int
+  @native def mxRecordIOWriterFree(handle: RecordIOHandle): Int
+  @native def mxRecordIOReaderFree(handle: RecordIOHandle): Int
+  @native def mxRecordIOWriterWriteRecord(handle: RecordIOHandle, buf: String, size: Int): Int
+  @native def mxRecordIOReaderReadRecord(handle: RecordIOHandle, buf: RefString): Int
+  @native def mxRecordIOWriterTell(handle: RecordIOHandle, pos: RefInt): Int
+  @native def mxRecordIOReaderSeek(handle: RecordIOHandle, pos: Int): Int
+
+  // Rtc
+  @native def mxRtcCreate(name: String,
+                          inputNames: Array[String],
+                          outputNames: Array[String],
+                          inputs: Array[NDArrayHandle],
+                          outputs: Array[NDArrayHandle],
+                          kernel: String,
+                          out: RtcHandleRef): Int
+  @native def mxRtcPush(handle: RtcHandle,
+                        inputs: Array[NDArrayHandle],
+                        outputs: Array[NDArrayHandle],
+                        gridDimX: Int,
+                        gridDimY: Int,
+                        gridDimZ: Int,
+                        blockDimX: Int,
+                        blockDimY: Int,
+                        blockDimZ: Int): Int
+  @native def mxRtcFree(handle: RtcHandle): Int
+
+  // CustomOp
+  @native def mxCustomOpRegister(regName: String, opProp: CustomOpProp): Int
+
+  // Profiler
+  @native def mxSetProfilerConfig(mode: Int, fileName: String): Int
+  @native def mxSetProfilerState(state: Int): Int
+  @native def mxDumpProfile(): Int
 }

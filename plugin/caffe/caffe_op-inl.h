@@ -2,7 +2,7 @@
  * Copyright (c) 2016 by Contributors
  * \file caffe_op-inl.h
  * \brief Caffe Operator
- * \author Haoran Wang 
+ * \author Haoran Wang
 */
 #ifndef PLUGIN_CAFFE_CAFFE_OP_INL_H_
 #define PLUGIN_CAFFE_CAFFE_OP_INL_H_
@@ -79,9 +79,9 @@ class CaffeOp : public Operator {
     using std::vector;
     using namespace mshadow;
     using namespace mshadow::expr;
-    for (index_t i = 0; i < req.size(); ++i)
+    for (uint32_t i = 0; i < req.size(); ++i)
       CHECK_EQ(req[i], kWriteTo);
-    index_t expected_num_data = param_.num_weight + param_.num_data;
+    int expected_num_data = param_.num_weight + param_.num_data;
     CHECK_EQ(in_data.size(), expected_num_data);
     CHECK_EQ(out_data.size(), param_.num_out);
 
@@ -100,9 +100,7 @@ class CaffeOp : public Operator {
                                        top_.begin(),
                                        out_data.begin(),
                                        param_.num_out);
-
     CaffeOpSetup();
-
     // Init caffe's weight pointer
     if (!init_w_) {
       init_w_ = true;
@@ -112,10 +110,17 @@ class CaffeOp : public Operator {
                                          param_.num_weight);
       caffe::SetOpBlobs(caffeOp_, wei_);
     }
-
+    if (ctx.is_train)
+      MXCAFFELAYER(caffeOp_, Dtype)->SetPhase(::caffe::TRAIN);
+    else
+      MXCAFFELAYER(caffeOp_, Dtype)->SetPhase(::caffe::TEST);
     caffeOp_->Forward(bot_, top_);
 
 #if defined(__CUDACC__)
+    // Sync cpu data to gpu data
+    for (uint32_t i = 0; i < top_.size(); ++i)
+      top_[i]->gpu_data();
+
     CHECK_EQ(cudaStreamSynchronize(NULL), cudaSuccess);
 #endif  // __CUDACC__
   }
@@ -140,10 +145,10 @@ class CaffeOp : public Operator {
     using namespace mshadow;
     using namespace mshadow::expr;
     CHECK_EQ(out_grad.size(), param_.num_out);
-    for (index_t i = 0; i < param_.num_data; ++i)
+    for (int i = 0; i < param_.num_data; ++i)
       CHECK(req[i] != kAddTo) << "caffe doesn't accm diff on bottom data";
 
-    index_t expected_num_data = param_.num_weight + param_.num_data;
+    int expected_num_data = param_.num_weight + param_.num_data;
     CHECK(in_data.size() == expected_num_data && in_grad.size() == expected_num_data);
     CHECK_EQ(req.size(), expected_num_data);
 
@@ -173,16 +178,20 @@ class CaffeOp : public Operator {
     }
 
     // Handle OpReqType of weights
-    for (index_t i = param_.num_data; i < expected_num_data; ++i)
+    for (int i = param_.num_data; i < expected_num_data; ++i)
       HandleOpReq(s, req[i], in_grad[i]);
 
     // Set BP flag
-    for (index_t i = 0; i < param_.num_data; ++i)
+    for (int i = 0; i < param_.num_data; ++i)
       flags_[i] = req[i] != kNullOp;
 
     caffeOp_->Backward(top_, flags_, bot_);
 
 #if defined(__CUDACC__)
+    // Sync cpu diff to gpu diff
+    for (uint32_t i = 0; i < bot_.size(); ++i)
+      bot_[i]->gpu_diff();
+
     CHECK_EQ(cudaStreamSynchronize(NULL), cudaSuccess);
 #endif  // __CUDACC__
   }
@@ -212,7 +221,7 @@ class CaffeOpProp : public OperatorProperty {
   std::vector<std::string> ListArguments() const override {
     std::vector<std::string> res;
     for (int i = 0; i < param_.num_data; ++i)
-      res.push_back(std::string("data_") + static_cast<char>('0' + i));
+      res.push_back(std::string("data_") + std::to_string(i));
 
     for (int i = 0; i < param_.num_weight; ++i) {
       if (i == 0)

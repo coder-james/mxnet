@@ -2,7 +2,7 @@
  * Copyright (c) 2016 by Contributors
  * \file caffe_loss-inl.h
  * \brief Caffe Operator
- * \author Haoran Wang 
+ * \author Haoran Wang
 */
 #ifndef PLUGIN_CAFFE_CAFFE_LOSS_INL_H_
 #define PLUGIN_CAFFE_CAFFE_LOSS_INL_H_
@@ -31,7 +31,8 @@ struct CaffeLossParam : public dmlc::Parameter<CaffeLossParam> {
   int num_data, num_out;
   float grad_scale;
 
-  DMLC_DECLARE_PARAMETER(CaffeLossParam) { DMLC_DECLARE_FIELD(prototxt).set_default("layer{}")
+  DMLC_DECLARE_PARAMETER(CaffeLossParam) {
+    DMLC_DECLARE_FIELD(prototxt).set_default("layer{}")
     .describe("Caffe's layer parameter");
     DMLC_DECLARE_FIELD(num_data).set_range(0, 100).set_default(2)
     .describe("Operator input number");
@@ -99,9 +100,17 @@ class CaffeLoss : public Operator {
                                       out_data.begin(),
                                       param_.num_out);
     CaffeOpSetup();
+    if (ctx.is_train)
+      MXCAFFELAYER(caffeOp_, Dtype)->SetPhase(::caffe::TRAIN);
+    else
+      MXCAFFELAYER(caffeOp_, Dtype)->SetPhase(::caffe::TEST);
     caffeOp_->Forward(bot_, top_);
 
 #if defined(__CUDACC__)
+    // Sync cpu data to gpu data
+    for (uint32_t i = 0; i < top_.size(); ++i)
+      top_[i]->gpu_data();
+
     CHECK_EQ(cudaStreamSynchronize(NULL), cudaSuccess);
 #endif  // __CUDACC__
   }
@@ -142,7 +151,7 @@ class CaffeLoss : public Operator {
                                       in_grad.begin(),
                                       param_.num_data);
     // Pass grad scale to caffe blob
-    top_[0]->set_cpu_diff(&grad_scale_);
+    MXCAFFEBLOB(top_[0], Dtype)->set_cpu_diff(&grad_scale_);
 
     // Set BP flag
     for (int i = 0; i < param_.num_data; ++i)
@@ -151,6 +160,10 @@ class CaffeLoss : public Operator {
     caffeOp_->Backward(top_, flags_, bot_);
 
 #if defined(__CUDACC__)
+    // Sync cpu diff to gpu diff
+    for (uint32_t i = 0; i < bot_.size(); ++i)
+      bot_[i]->gpu_diff();
+
     CHECK_EQ(cudaStreamSynchronize(NULL), cudaSuccess);
 #endif  // __CUDACC__
   }

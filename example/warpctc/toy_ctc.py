@@ -1,5 +1,6 @@
 # pylint: disable=C0111,too-many-arguments,too-many-instance-attributes,too-many-locals,redefined-outer-name,fixme
 # pylint: disable=superfluous-parens, no-member, invalid-name
+from __future__ import print_function
 import sys
 sys.path.insert(0, "../../python")
 import numpy as np
@@ -35,10 +36,10 @@ def gen_rand():
     buf = str(num)
     while len(buf) < 4:
         buf = "0" + buf
-    ret = np.array([])
+    ret = []
     for i in range(80):
-        c = int(buf[i / 20])
-        ret = np.concatenate([ret, gen_feature(c)])
+        c = int(buf[i // 20])
+        ret.append(gen_feature(c))
     return buf, ret
 
 def get_label(buf):
@@ -55,7 +56,7 @@ class DataIter(mx.io.DataIter):
         self.num_label = num_label
         self.init_states = init_states
         self.init_state_arrays = [mx.nd.zeros(x[1]) for x in init_states]
-        self.provide_data = [('data', (batch_size, 10 * 80))] + init_states
+        self.provide_data = [('data', (batch_size, 80, 10))] + init_states
         self.provide_label = [('label', (self.batch_size, 4))]
 
     def __iter__(self):
@@ -154,7 +155,7 @@ if __name__ == '__main__':
     head = '%(asctime)-15s %(message)s'
     logging.basicConfig(level=logging.DEBUG, format=head)
     
-    print 'begin fit'
+    print('begin fit')
 
     model.fit(X=data_train, eval_data=data_val,
               eval_metric = mx.metric.np(Accuracy),

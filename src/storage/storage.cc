@@ -9,7 +9,6 @@
 #include "./naive_storage_manager.h"
 #include "./pooled_storage_manager.h"
 #include "./cpu_device_storage.h"
-#include "./gpu_device_storage.h"
 #include "./pinned_memory_storage.h"
 #include "../common/cuda_utils.h"
 #include "../common/lazy_alloc_array.h"
@@ -29,21 +28,22 @@ class StorageImpl : public Storage {
   static constexpr size_t kMaxNumberOfDevices = Context::kMaxDevType + 1;
   static constexpr size_t kMaxNumberOfDeviceIDs = Context::kMaxDevID + 1;
 
-  template <class DeviceStorage>
-  using CurrentStorageManager =
-      storage::PooledStorageManager<DeviceStorage>;
-
   static void ActivateDevice(Context ctx) {
     switch (ctx.dev_type) {
       case Context::kCPU: break;
       case Context::kGPU:
-      case Context::kCPUPinned:
+      case Context::kCPUPinned: {
+          int gpu_num = 0;
 #if MXNET_USE_CUDA
-        CUDA_CALL(cudaSetDevice(ctx.dev_id));
-#else  // MXNET_USE_CUDA
-        LOG(FATAL) << "Please compile with CUDA enabled";
+          CUDA_CALL(cudaGetDeviceCount(&gpu_num));
 #endif  // MXNET_USE_CUDA
-        break;
+          if (gpu_num > 0) {
+#if MXNET_USE_CUDA
+          CUDA_CALL(cudaSetDevice(ctx.dev_id));
+#endif  // MXNET_USE_CUDA
+          }
+          break;
+        }
       default:
         LOG(FATAL) << "Unimplemented device";
     }
@@ -59,20 +59,28 @@ Storage::Handle StorageImpl::Alloc(size_t size, Context ctx) {
   hd.ctx = ctx;
   hd.size = size;
   auto&& device = storage_managers_.at(ctx.dev_type);
-  storage::StorageManager *manager = device.Get(
+  std::shared_ptr<storage::StorageManager> manager = device.Get(
       ctx.dev_id, [ctx]() {
         storage::StorageManager *ptr = nullptr;
         switch (ctx.dev_type) {
           case Context::kCPU: {
-            ptr = new CurrentStorageManager<storage::CPUDeviceStorage>();
+            ptr = new storage::NaiveStorageManager<storage::CPUDeviceStorage>();
             break;
           }
           case Context::kCPUPinned: {
-            ptr = new CurrentStorageManager<storage::PinnedMemoryStorage>();
+#if MXNET_USE_CUDA
+            ptr = new storage::NaiveStorageManager<storage::PinnedMemoryStorage>();
+#else
+            ptr = new storage::NaiveStorageManager<storage::CPUDeviceStorage>();
+#endif  // MXNET_USE_CUDA
             break;
           }
           case Context::kGPU: {
-            ptr = new CurrentStorageManager<storage::GPUDeviceStorage>();
+#if MXNET_USE_CUDA
+            ptr = new storage::GPUPooledStorageManager();
+#else
+            LOG(FATAL) << "Compile with USE_CUDA=1 to enable GPU usage";
+#endif  // MXNET_USE_CUDA
             break;
           }
           default: LOG(FATAL) <<  "Unimplemented device " << ctx.dev_type;
@@ -87,7 +95,7 @@ Storage::Handle StorageImpl::Alloc(size_t size, Context ctx) {
 void StorageImpl::Free(Storage::Handle handle) {
   const Context &ctx = handle.ctx;
   auto&& device = storage_managers_.at(ctx.dev_type);
-  storage::StorageManager *manager = device.Get(
+  std::shared_ptr<storage::StorageManager> manager = device.Get(
       ctx.dev_id, []() {
         LOG(FATAL) <<  "Cannot Free space to a device you have not allocated";
         return nullptr;
@@ -99,7 +107,7 @@ void StorageImpl::Free(Storage::Handle handle) {
 void StorageImpl::DirectFree(Storage::Handle handle) {
   const Context &ctx = handle.ctx;
   auto&& device = storage_managers_.at(ctx.dev_type);
-  storage::StorageManager *manager = device.Get(
+  std::shared_ptr<storage::StorageManager> manager = device.Get(
       ctx.dev_id, []() {
         LOG(FATAL) <<  "Cannot Free space to a device you have not allocated";
         return nullptr;
