@@ -101,7 +101,7 @@ __global__ void DetectionForwardKernel(DType *out, const DType *obj_pred,
   __syncthreads();
 
   if (valid_count < 1 || nms_threshold <= 0 || nms_threshold > 1) return;
-  if (index == 0) printf("%d\n", valid_count);
+  //if (index == 0) printf("%d\n", valid_count);
   const int size = valid_count;
   temp_space += nbatch * num_anchors * out_channel;
   DType *src = out;
