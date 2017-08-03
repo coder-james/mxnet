@@ -31,6 +31,20 @@ __device__ void MatchIOU(const DType *anchors, const DType *wh, const DType *lab
   (*iou) = u <= 0.f ? static_cast<DType>(0) : static_cast<DType>(i / u);
 }
 template<typename DType>
+__device__ void MatchBiasIOU(const DType *anchors, const DType *label, DType *iou){
+  float asw = anchors[2];
+  float ash = anchors[3];
+  float pw = asw / 2;
+  float ph = ash / 2;
+  float gw = (label[3] - label[1]) / 2;
+  float gh = (label[4] - label[2]) / 2;
+  float w = max(0.f, min(pw, gw) - max(-pw, -gw));
+  float h = max(0.f, min(ph, gh) - max(-ph, -gh));
+  float i = w * h;
+  float u = 4 * pw * ph + 4 * gw * gh - i;
+  (*iou) = u <= 0.f ? static_cast<DType>(0) : static_cast<DType>(i / u);
+}
+template<typename DType>
 __device__ void CalculateIOU(const DType *anchors, const DType *dxy, const DType *wh, const DType *label, DType *iou) {
   float al = anchors[0];
   float at = anchors[1];
@@ -119,7 +133,8 @@ __global__ void AssignTrainingTargets(DType *obj_target, DType *nobj_target,
 				     const DType *labels, const DType *anchors, 
 				     DType *value, const int num_anchors,
 				     const int num_anchor_channel, const int num_labels, 
-				     const int label_width, const int num_classes) {
+				     const int label_width, const int num_classes,
+				     const bool match_bias) {
   const int nbatch = blockIdx.x;
   obj_target += nbatch * num_anchors;
   nobj_target += nbatch * num_anchors;
@@ -141,6 +156,7 @@ __global__ void AssignTrainingTargets(DType *obj_target, DType *nobj_target,
       float tymin = p_label[2];
       float txmax = p_label[3];
       float tymax = p_label[4];
+      int flag = 0; //0 same feature, 1 other feature
       for (int j = 0; j < num_anchors; ++j){
 	const DType *p_anchor = anchors + j * num_anchor_channel;
 	int l = p_anchor[0];
@@ -151,48 +167,65 @@ __global__ void AssignTrainingTargets(DType *obj_target, DType *nobj_target,
 	int gy = (tymax + tymin) / 2 * H;
 	if(l == gx && t == gy){
           DType iou;
-	  MatchIOU(p_anchor, wh_target + j * 2, p_label, &iou);
+          if(match_bias){
+	    MatchBiasIOU(p_anchor, p_label, &iou); //match bias
+	  }else{
+	    MatchIOU(p_anchor, wh_target + j * 2, p_label, &iou);
+          }
           if(iou > max_overlap){
             max_overlap = iou;
 	    best_anchor = j;
           }
 	}
-      }
-      if(best_anchor != -1){
-	p_value[0] = max_overlap;
-	if(max_overlap > .5)
-	  p_value[1] = 1;
- 	int tlabel = p_label[0];
-	int offset_c = best_anchor * num_classes;
-	p_value[2] = cls_target[offset_c + tlabel];
-	p_value[3] = obj_target[best_anchor];
-	p_value[4] = 1;
-
-	nobj_target[best_anchor] = obj_target[best_anchor];
-	obj_target[best_anchor] = max_overlap;
-	int offset_a = best_anchor * num_anchor_channel;
-        float al = anchors[offset_a];
-        float at = anchors[offset_a + 1];
-        float abw = anchors[offset_a + 2];
-        float abh = anchors[offset_a + 3];
-        float fw = anchors[offset_a + 4];
-        float fh = anchors[offset_a + 5];
-        float gl = p_label[1];
-        float gt = p_label[2];
-        float gr = p_label[3];
-        float gb = p_label[4];
-        float gw = gr - gl;
-        float gh = gb - gt;
-        float gx = (gl + gr) * 0.5;
-        float gy = (gt + gb) * 0.5;
-	int offset = best_anchor * 2;
-        dxy_target[offset] = DType(gx*fw - al);
-        dxy_target[offset + 1] = DType(gy*fh - at);
-        wh_target[offset] = DType(log(gw / abw)); 
-        wh_target[offset + 1] = DType(log(gh / abh));
-	for(int c = 0;c < num_classes; c++)
-	  cls_target[offset_c + c] = 0;
-	cls_target[offset_c + tlabel] = 1;
+        if(j == num_anchors - 1){
+          flag = 1;
+        }else{
+          const DType *next_anchor = anchors + (j + 1) * num_anchor_channel;
+          int nextW = next_anchor[4];
+          if(nextW != W){
+	    flag = 1;
+          }else{
+            flag = 0;
+          }
+        }
+        if(flag == 1){
+          if(best_anchor != -1){
+            p_value[0] = max_overlap;
+            if(max_overlap > .5)
+              p_value[1] = 1;
+            int tlabel = p_label[0];
+            int offset_c = best_anchor * num_classes;
+            p_value[2] = cls_target[offset_c + tlabel];
+            p_value[3] = obj_target[best_anchor];
+            p_value[4] = 1;
+            nobj_target[best_anchor] = obj_target[best_anchor];
+            obj_target[best_anchor] = max_overlap;
+            int offset_a = best_anchor * num_anchor_channel;
+            float al = anchors[offset_a];
+            float at = anchors[offset_a + 1];
+            float abw = anchors[offset_a + 2];
+            float abh = anchors[offset_a + 3];
+            float fw = anchors[offset_a + 4];
+            float fh = anchors[offset_a + 5];
+            float gl = p_label[1];
+            float gt = p_label[2];
+            float gr = p_label[3];
+            float gb = p_label[4];
+            float gw = gr - gl;
+            float gh = gb - gt;
+            float gx = (gl + gr) * 0.5;
+            float gy = (gt + gb) * 0.5;
+            int offset = best_anchor * 2;
+            dxy_target[offset] = DType(gx*fw - al);
+            dxy_target[offset + 1] = DType(gy*fh - at);
+            wh_target[offset] = DType(log(gw / abw)); 
+            wh_target[offset + 1] = DType(log(gh / abh));
+            for(int c = 0;c < num_classes; c++)
+              cls_target[offset_c + c] = 0;
+            cls_target[offset_c + tlabel] = 1;
+          }
+          best_anchor = -1;
+        }
       }
     }
   }
@@ -225,7 +258,8 @@ inline void MultiRegionTargetForward(const Tensor<gpu, 2, DType> &obj_target,
                            const Tensor<gpu, 3, DType> &labels,
                            const Tensor<gpu, 4, DType> &temp_space,
                            const float threshold,
-                           const int num_classes) {
+                           const int num_classes,
+			   const bool match_bias) {
   const int num_batches = labels.size(0);
   const int num_labels = labels.size(1);
   const int label_width = labels.size(2);
@@ -254,7 +288,7 @@ inline void MultiRegionTargetForward(const Tensor<gpu, 2, DType> &obj_target,
   cuda::AssignTrainingTargets<DType><<<num_batches, num_threads>>>(
     obj_target.dptr_, nobj_target.dptr_, dxy_target.dptr_, wh_target.dptr_, cls_target.dptr_, 
     gt_flags, labels.dptr_, anchors.dptr_, value, num_anchors, num_anchor_channel, num_labels, 
-    label_width, num_classes);
+    label_width, num_classes, match_bias);
   MULTIREGION_TARGET_CUDA_CHECK(cudaPeekAtLastError());
 }
 }  // namespace mshadow

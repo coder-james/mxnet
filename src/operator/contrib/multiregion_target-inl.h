@@ -31,11 +31,14 @@ enum MultiRegionTargetOpResource {kTempSpace};
 struct MultiRegionTargetParam : public dmlc::Parameter<MultiRegionTargetParam> {
   float threshold;
   int num_classes;
+  bool match_bias;
   DMLC_DECLARE_PARAMETER(MultiRegionTargetParam) {
     DMLC_DECLARE_FIELD(threshold).set_default(0.5f)
     .describe("Threshold to be regarded as containing object.");
     DMLC_DECLARE_FIELD(num_classes).set_default(-1)
     .describe("Number of classes.");
+    DMLC_DECLARE_FIELD(match_bias).set_default(true)
+    .describe("Whether to match bias.");
   }
 };  // struct MultiRegionTargetParam
 
@@ -106,7 +109,7 @@ class MultiRegionTargetOp : public Operator {
 
     MultiRegionTargetForward(obj_target, nobj_target, dxy_target, wh_target, cls_target,
                           anchors, labels, temp_space,
-                          param_.threshold, param_.num_classes);
+                          param_.threshold, param_.num_classes, param_.match_bias);
   }
 
   virtual void Backward(const OpContext &ctx,

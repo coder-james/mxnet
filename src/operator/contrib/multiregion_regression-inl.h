@@ -19,19 +19,22 @@ namespace mxnet {
 namespace op {
 
 namespace reg_enum {
-enum MultiRegionRegressionOpInputs {kData, kLabel};
+enum MultiRegionRegressionOpInputs {kData, kLabel, kScale};
 enum MultiRegionRegressionOutputs {kOut};
 }  // reg_enum
 
 struct MultiRegionRegressionParam : public dmlc::Parameter<MultiRegionRegressionParam> {
   float grad_scale;
+  bool scalable;
   DMLC_DECLARE_PARAMETER(MultiRegionRegressionParam) {
     DMLC_DECLARE_FIELD(grad_scale).set_default(1.0f)
     .describe("Scale the gradient by a float factor");
+    DMLC_DECLARE_FIELD(scalable).set_default(false)
+    .describe("Scalable loss gradient.");
   };
 };
 
-template<typename xpu, typename RegOp>
+template<typename xpu, typename FOp>
 class MultiRegionRegressionOp : public Operator {
  public:
   explicit MultiRegionRegressionOp(MultiRegionRegressionParam param) : param_(param) {}
@@ -43,13 +46,13 @@ class MultiRegionRegressionOp : public Operator {
                        const std::vector<TBlob> &aux_args) {
     using namespace mshadow;
     using namespace mshadow::expr;
-    CHECK_EQ(in_data.size(), 2U) << "MultiRegionRegressionOp Input: [data, label]";
+    CHECK_EQ(in_data.size(), 3U) << "MultiRegionRegressionOp Input: [data, label, coord_grad_scale]";
     CHECK_EQ(out_data.size(), 1U) << "MultiRegionRegressionOp Output: [output]";
     Stream<xpu> *s = ctx.get_stream<xpu>();
     Tensor<xpu, 2> out = out_data[reg_enum::kOut].FlatTo2D<xpu, real_t>(s);
     Tensor<xpu, 2> data = in_data[reg_enum::kData].FlatTo2D<xpu, real_t>(s);
     Tensor<xpu, 2> label = in_data[reg_enum::kLabel].FlatTo2D<xpu, real_t>(s);
-    Assign(out, req[reg_enum::kOut], F<RegOp>(data, label));
+    Assign(out, req[reg_enum::kOut], F<FOp>(data, label));
   }
 
   virtual void Backward(const OpContext &ctx,
@@ -61,14 +64,19 @@ class MultiRegionRegressionOp : public Operator {
                         const std::vector<TBlob> &aux_args) {
     using namespace mshadow;
     using namespace mshadow::expr;
-    CHECK_EQ(in_data.size(), 2U);
+    CHECK_EQ(in_data.size(), 3U);
     CHECK_EQ(out_grad.size(), 1U);
     CHECK_GE(in_grad.size(), 1U);
     CHECK_GE(req.size(), 1U);
     Stream<xpu> *s = ctx.get_stream<xpu>();
     Tensor<xpu, 2> out = out_data[reg_enum::kOut].FlatTo2D<xpu, real_t>(s);
     Tensor<xpu, 2> grad = in_grad[reg_enum::kData].FlatTo2D<xpu, real_t>(s);
-    Assign(grad, req[reg_enum::kData], param_.grad_scale * out);
+    if(param_.scalable){
+        Tensor<xpu, 2> scale = in_data[reg_enum::kScale].FlatTo2D<xpu, real_t>(s);
+        Assign(grad, req[reg_enum::kData], F<mshadow::op::mul>(scale, out));
+    }else{
+        Assign(grad, req[reg_enum::kData], param_.grad_scale * out);
+    }
   }
 
  private:
@@ -83,7 +91,7 @@ Operator* CreateMultiRegionRegressionOp(MultiRegionRegressionParam param);
 class MultiRegionRegressionProp : public OperatorProperty {
  public:
   std::vector<std::string> ListArguments() const override {
-    return {"data", "label"};
+    return {"data", "label", "coord_grad_scale"};
   }
 
   void Init(const std::vector<std::pair<std::string, std::string> >& kwargs) override {
@@ -98,7 +106,7 @@ class MultiRegionRegressionProp : public OperatorProperty {
                   std::vector<TShape> *out_shape,
                   std::vector<TShape> *aux_shape) const override {
     using namespace mshadow;
-    CHECK_EQ(in_shape->size(), 2) << "Input:[data, label]";
+    CHECK_EQ(in_shape->size(), 3) << "Input:[data, label, coord_grad_scale]";
     const TShape &dshape = in_shape->at(0);
     if (dshape.ndim() == 0) return false;
     auto &lshape = (*in_shape)[1];
@@ -127,7 +135,7 @@ class MultiRegionRegressionProp : public OperatorProperty {
     const std::vector<int> &out_grad,
     const std::vector<int> &in_data,
     const std::vector<int> &out_data) const override {
-    return {out_data[reg_enum::kOut]};
+    return {in_data[reg_enum::kScale], out_data[reg_enum::kOut]};
   }
 
   std::vector<std::pair<int, void*> > BackwardInplaceOption(

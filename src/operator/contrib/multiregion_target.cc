@@ -31,6 +31,20 @@ inline void AssignLocTargets(const DType *anchor, const DType *l, DType *dxy, DT
   wh[1] = DType(std::log(gh / abh));
 }
 template<typename DType>
+inline void MatchBiasIOU(const DType *anchors, const DType *label, DType *iou){
+  float abw = anchors[2];
+  float abh = anchors[3];
+  float pw = abw / 2;
+  float ph = abh / 2;
+  float gw = (label[3] - label[1]) / 2;
+  float gh = (label[4] - label[2]) / 2;
+  float w = std::max(0.f, std::min(pw, gw) - std::max(-pw, -gw));
+  float h = std::max(0.f, std::min(ph, gh) - std::max(-ph, -gh));
+  float i = w * h;
+  float u = 4 * pw * ph + 4 * gw * gh - i;
+  (*iou) = u <= 0.f ? static_cast<DType>(0) : static_cast<DType>(i / u);
+}
+template<typename DType>
 inline void MatchIOU(const DType *anchors, const DType *wh, const DType *label, DType *iou){
   //match weight/height predictions instead of anchor weight/height
   float abw = anchors[2];
@@ -85,7 +99,8 @@ inline void MultiRegionTargetForward(const Tensor<cpu, 2, DType> &obj_target,
                            const Tensor<cpu, 3, DType> &labels,
                            const Tensor<cpu, 4, DType> &temp_space,
                            const float threshold,
-                           const int num_classes) {
+                           const int num_classes,
+			   const bool match_bias) {
   const DType *p_anchor = anchors.dptr_;
   const int num_batches = labels.size(0);
   const int num_labels = labels.size(1);
@@ -144,7 +159,11 @@ inline void MultiRegionTargetForward(const Tensor<cpu, 2, DType> &obj_target,
           //match between gt center locations and anchor boxes
 	  if(l == gx && t == gy){
 	      DType iou;
-              MatchIOU(pp_anchor, p_wh_target + i * 2, pp_label, &iou);
+              if(match_bias){
+                  MatchBiasIOU(pp_anchor, pp_label, &iou);
+              }else{
+                  MatchIOU(pp_anchor, p_wh_target + i * 2, pp_label, &iou);
+              }
               if(iou > max_overlap){
                 max_overlap = iou;
 	        best_anchor = i;
